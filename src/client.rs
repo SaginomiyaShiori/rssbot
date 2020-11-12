@@ -75,16 +75,12 @@ pub async fn pull_feed(url: &str) -> Result<Rss, FeedError> {
     Ok(crate::feed::fix_relative_url(feed, url))
 }
 
-pub fn init_client(bot_name: &str, insecue: bool, max_feed_size: u64) {
+pub fn init_client(insecue: bool, max_feed_size: u64) {
     let mut headers = reqwest::header::HeaderMap::new();
     let ua = format!(
         concat!(
-            env!("CARGO_PKG_NAME"),
-            "/",
-            env!("CARGO_PKG_VERSION"),
-            " (+https://t.me/{})"
-        ),
-        bot_name
+            env!("CARGO_PKG_NAME")
+        )
     );
     headers.insert(
         reqwest::header::USER_AGENT,
