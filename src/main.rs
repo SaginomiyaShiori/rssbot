@@ -1,4 +1,4 @@
-#![feature(backtrace)]
+#![feature(error_reporter)]
 #![recursion_limit = "256"]
 
 use std::convert::TryInto;
@@ -6,16 +6,15 @@ use std::env;
 use std::panic;
 use std::path::PathBuf;
 use std::process;
-use std::sync::{Arc, Mutex}; // TODO: async Mutex
+use std::sync::Arc;
 
 use anyhow::Context;
+use hyper_proxy::{Intercept, Proxy};
 use once_cell::sync::OnceCell;
 use structopt::StructOpt;
-use tbot::{
-    self,
-    proxy::{Intercept, Proxy},
-};
-use tokio;
+use tbot;
+use tbot::bot::Uri;
+use tokio::{self, sync::Mutex};
 
 // Include the tr! macro and localizations
 include!(concat!(env!("OUT_DIR"), "/ctl10n_macros.rs"));
@@ -72,12 +71,25 @@ pub struct Opt {
     #[structopt(long, value_name = "bytes", default_value = "2097152")]
     // default is 2MiB
     max_feed_size: u64,
-    /// Single user mode, only specified user can use this bot
-    #[structopt(long, value_name = "user id")]
-    single_user: Option<i64>,
+    /// Private mode, only specified user can use this bot.
+    /// This argument can be passed multiple times to allow multiple admins
+    #[structopt(
+        long,
+        value_name = "user id",
+        number_of_values = 1,
+        alias = "single_user" // For compatibility
+    )]
+    admin: Vec<i64>,
     /// Make bot commands only accessible for group admins.
     #[structopt(long)]
     restricted: bool,
+    /// Custom telegram api URI
+    #[structopt(
+        long,
+        value_name = "tgapi-uri",
+        default_value = "https://api.telegram.org/"
+    )]
+    api_uri: Uri,
     /// DANGER: Insecure mode, accept invalid TLS certificates
     #[structopt(long)]
     insecure: bool,
@@ -93,31 +105,18 @@ fn check_interval(s: String) -> Result<(), String> {
     })
 }
 
-macro_rules! handle {
-    ($env: expr, $f: expr) => {{
-        let env = $env.clone();
-        let f = $f;
-        move |cmd| {
-            let future = f(env.clone(), cmd);
-            async {
-                if let Err(e) = future.await {
-                    print_error(e);
-                }
-            }
-        }
-    }};
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     enable_fail_fast();
 
     let opt = Opt::from_args();
     let db = Arc::new(Mutex::new(Database::open(opt.database.clone())?));
+    let bot_builder = tbot::bot::Builder::with_string_token(opt.token.clone())
+        .server_uri(opt.api_uri.clone());
     let bot = if let Some(proxy) = init_proxy() {
-        tbot::Bot::with_proxy(opt.token.clone(), proxy)
+        bot_builder.proxy(proxy).build()
     } else {
-        tbot::Bot::new(opt.token.clone())
+        bot_builder.build()
     };
     let me = bot
         .get_me()
@@ -135,22 +134,10 @@ async fn main() -> anyhow::Result<()> {
     fetcher::start(bot.clone(), db.clone(), opt.min_interval, opt.max_interval);
 
     let opt = Arc::new(opt);
-    let check_command = move |cmd| {
-        let opt = opt.clone();
-        async move { commands::check_command(&opt, cmd).await }
-    };
 
     let mut event_loop = bot.event_loop();
     event_loop.username(me.user.username.unwrap());
-    event_loop.start_if(check_command.clone(), handle!(db, commands::start));
-    event_loop.command_if("rss", check_command.clone(), handle!(db, commands::rss));
-    event_loop.command_if("sub", check_command.clone(), handle!(db, commands::sub));
-    event_loop.command_if("unsub", check_command.clone(), handle!(db, commands::unsub));
-    event_loop.command_if(
-        "export",
-        check_command.clone(),
-        handle!(db, commands::export),
-    );
+    commands::register_commands(&mut event_loop, opt, db);
 
     event_loop.polling().start().await.unwrap();
     Ok(())
@@ -179,29 +166,10 @@ fn init_proxy() -> Option<Proxy> {
 }
 
 fn print_error<E: std::error::Error>(err: E) {
-    eprintln!("Error: {}", err);
-    let mut deepest_backtrace = err.backtrace();
-
-    let mut err: &dyn std::error::Error = &err;
-    if let Some(e) = err.source() {
-        eprintln!("\nCaused by:");
-        let multiple = e.source().is_some();
-        let mut line_counter = 0..;
-        while let (Some(e), Some(line)) = (err.source(), line_counter.next()) {
-            if multiple {
-                eprint!("{: >4}: ", line)
-            } else {
-                eprint!("    ")
-            };
-            eprintln!("{}", e);
-            if let Some(backtrace) = e.backtrace() {
-                deepest_backtrace = Some(backtrace);
-            }
-            err = e;
-        }
-    }
-
-    if let Some(backtrace) = deepest_backtrace {
-        eprintln!("\nBacktrace:\n{}", backtrace);
-    }
+    eprintln!(
+        "Error: {}",
+        std::error::Report::new(err)
+            .pretty(true)
+            .show_backtrace(true)
+    );
 }
