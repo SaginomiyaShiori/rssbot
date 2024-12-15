@@ -77,11 +77,7 @@ pub async fn pull_feed(url: &str) -> Result<Rss, FeedError> {
 
 pub fn init_client(insecue: bool, max_feed_size: u64) {
     let mut headers = reqwest::header::HeaderMap::new();
-    let ua = format!(
-        concat!(
-            env!("CARGO_PKG_NAME")
-        )
-    );
+    let ua = format!("Mozilla/5.0 (Windows NT 10.0; rv:127.0) Gecko/20100101 Firefox/127.0");
     headers.insert(
         reqwest::header::USER_AGENT,
         reqwest::header::HeaderValue::from_str(&ua).unwrap(),
